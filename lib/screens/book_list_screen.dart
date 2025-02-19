@@ -7,10 +7,10 @@ class BookListScreen extends StatefulWidget {
   const BookListScreen({super.key});
 
   @override
-  _BookListScreenState createState() => _BookListScreenState();
+  BookListScreenState createState() => BookListScreenState();
 }
 
-class _BookListScreenState extends State<BookListScreen> {
+class BookListScreenState extends State<BookListScreen> {
   int _currentPage = 1; // Track the current page
   BooksResponse? _booksResponse; // Store the fetched books response
   bool _isLoading = false; // Track loading state

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:translator/translator.dart';
 import '../models/book.dart';
+import '../services/eleven_labs_tts.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
 class BookReaderScreen extends StatefulWidget {
   final Book book;
@@ -9,36 +11,30 @@ class BookReaderScreen extends StatefulWidget {
   const BookReaderScreen({super.key, required this.book});
 
   @override
-  State<BookReaderScreen> createState() => _BookReaderScreenState();
+  BookReaderScreenState createState() => BookReaderScreenState();
 }
 
-class _BookReaderScreenState extends State<BookReaderScreen> {
-  final FlutterTts flutterTts = FlutterTts();
+class BookReaderScreenState extends State<BookReaderScreen> {
+  final ElevenLabsTTS elevenLabsTts = ElevenLabsTTS(); // Use Eleven Labs TTS
   final translator = GoogleTranslator();
   bool isPlaying = false;
   final ScrollController _scrollController = ScrollController();
   List<String> sentences = [];
   List<String> translatedSentences = [];
   int currentSentenceIndex = 0;
+  Duration? currentPosition; // Track the current position
+
+  // Declare the selected voice ID variable
+  String? selectedVoiceId;
+
+  // Remove the hard-coded voices list
+  List<Map<String, dynamic>> voices = [];
 
   @override
   void initState() {
     super.initState();
-    _initTts();
     _prepareSentences();
-  }
-
-  Future<void> _initTts() async {
-    await flutterTts.setLanguage("en-US");
-    await flutterTts.setSpeechRate(0.4);
-    await flutterTts.setVolume(0.5);
-    await flutterTts.setPitch(0.8);
-
-    flutterTts.setCompletionHandler(() {
-      if (isPlaying) {
-        _speakNext();
-      }
-    });
+    _fetchVoices(); // Fetch voices on initialization
   }
 
   void _prepareSentences() {
@@ -47,6 +43,26 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
         .split(RegExp(r'(?<=[.!?])\s+'))
         .where((s) => s.trim().isNotEmpty)
         .toList();
+
+    // Split sentences into chunks of approximately 50 words
+    List<String> wordChunks = [];
+    String currentChunk = '';
+
+    for (String sentence in sentences) {
+      List<String> words = sentence.split(' ');
+      for (String word in words) {
+        if ((currentChunk.split(' ').length + 1) > 50) {
+          wordChunks.add(currentChunk.trim());
+          currentChunk = '';
+        }
+        currentChunk += '$word ';
+      }
+    }
+    if (currentChunk.isNotEmpty) {
+      wordChunks.add(currentChunk.trim());
+    }
+
+    sentences = wordChunks; // Update sentences to be the new word chunks
 
     // Translate all sentences
     _translateSentences();
@@ -73,37 +89,91 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
       return;
     }
 
-    // Speak English
-    await flutterTts.setLanguage("en-US");
-    await flutterTts.speak(sentences[currentSentenceIndex]);
+    // Get the current sentence
+    String currentSentence = sentences[currentSentenceIndex];
+    print(
+        "Attempting to whisper: $currentSentence"); // Log the current sentence being whispered
 
-    // Wait a bit
-    await Future.delayed(const Duration(milliseconds: 500));
+    // Speak the entire sentence with whispering effect
+    await elevenLabsTts.speak(currentSentence,
+        voiceId: selectedVoiceId,
+        whisper: true); // Assuming 'whisper' is a valid parameter
+    await Future.delayed(const Duration(
+        milliseconds: 500)); // Wait a bit before moving to the next sentence
 
-    // Speak Korean
-    await flutterTts.setLanguage("ko-KR");
-    await flutterTts.speak(translatedSentences[currentSentenceIndex]);
-
-    currentSentenceIndex++;
+    currentSentenceIndex++; // Move to the next sentence
+    await _speakNext(); // Recursively call to speak the next sentence
   }
 
   Future<void> _speak(String text) async {
+    print("Current state: isPlaying = $isPlaying");
     if (!isPlaying) {
       setState(() {
         isPlaying = true;
-        currentSentenceIndex = 0;
       });
-      _speakNext();
+      print("Starting to speak...");
+      await _speakNext();
     } else {
-      setState(() => isPlaying = false);
-      await flutterTts.stop();
+      setState(() {
+        isPlaying = false;
+      });
+      // Get the current position before stopping
+      currentPosition =
+          await elevenLabsTts.getCurrentPosition(); // Get current position
+      print("Current position before stopping: $currentPosition");
+      await elevenLabsTts.stop(); // Stop the audio
+    }
+  }
+
+  Future<void> resumeAudio() async {
+    print("Attempting to resume audio...");
+    if (currentPosition != null) {
+      print("Resuming audio from position: $currentPosition");
+      await elevenLabsTts.seek(currentPosition!); // Seek to the last position
+      await elevenLabsTts.resume(); // Resume playback
+      setState(() {
+        isPlaying = true; // Update the playing state
+      });
+    } else {
+      print("No current position to resume from.");
+      // New feedback for the user
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("No audio position to resume from.")));
+
+      // Start audio from the beginning
+      currentSentenceIndex = 0; // Reset to the first sentence
+      await _speak(widget.book.content); // Start speaking from the beginning
     }
   }
 
   @override
   void dispose() {
-    flutterTts.stop();
-    super.dispose();
+    elevenLabsTts.stop(); // Call the stop method
+    super.dispose(); // Ensure the superclass dispose method is called
+  }
+
+  // New method to fetch voices from the API
+  Future<void> _fetchVoices() async {
+    try {
+      final response =
+          await http.get(Uri.parse('https://api.elevenlabs.io/v1/voices'));
+      if (response.statusCode == 200) {
+        final List<dynamic> voiceData = json.decode(response.body)['voices'];
+        setState(() {
+          voices = voiceData
+              .map((voice) => {
+                    "id": voice['voice_id'] as String,
+                    "name": voice['name'] as String,
+                  })
+              .toList();
+        });
+        print("Response body: ${response.body}");
+      } else {
+        throw Exception('Failed to load voices');
+      }
+    } catch (e) {
+      print("Error fetching voices: $e");
+    }
   }
 
   @override
@@ -111,27 +181,37 @@ class _BookReaderScreenState extends State<BookReaderScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.book.title),
-        actions: [
-          IconButton(
-            icon: Icon(isPlaying ? Icons.stop : Icons.play_arrow),
-            onPressed: () => _speak(widget.book.content),
-          ),
-        ],
       ),
       body: SingleChildScrollView(
         controller: _scrollController,
-        padding: const EdgeInsets.all(16.0),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              widget.book.title,
-              style: Theme.of(context).textTheme.headlineMedium,
+            // Dropdown menu for voice selection
+            DropdownButton<String>(
+              hint: const Text("Select a voice"),
+              value: selectedVoiceId,
+              onChanged: (String? newValue) {
+                setState(() {
+                  selectedVoiceId = newValue;
+                });
+              },
+              items: voices.map<DropdownMenuItem<String>>((voice) {
+                return DropdownMenuItem<String>(
+                  value: voice["id"],
+                  child: Text(voice["name"]!),
+                );
+              }).toList(),
             ),
-            const SizedBox(height: 8),
-            Text(
-              'By ${widget.book.author}',
-              style: Theme.of(context).textTheme.titleMedium,
+            const SizedBox(height: 16),
+            ElevatedButton(
+              onPressed: () {
+                if (isPlaying) {
+                  _speak(widget.book.content); // Stop the audio
+                } else {
+                  resumeAudio(); // Resume the audio
+                }
+              },
+              child: Text(isPlaying ? 'Stop' : 'Play'),
             ),
             const SizedBox(height: 16),
             Text(
